@@ -115,6 +115,46 @@ construct <- function(exprmatrix, cellidentity=NULL, projname=NULL) {
     return(object)
 }
 
+#' construct a slice object from a Seurat object
+#'
+#' construct and initialize a slice object from a Seurat object
+#'
+#' @param obj A Seurat object containing sample data;
+#' @param assay The assay to extract expression matrix. Default is RNA
+#' @param cellidentity Either character indicating which meta data column to use or a character assay in the length of cell count ob the object
+#' @param projname A string describing the analysis; if not set, the default value is "SLICE-" with timestamp information
+#' @return the constructed and initialized slice object
+#' @export
+
+construct_from_seurat <- function(obj, assay="RNA", cellidentity=NULL, projname=NULL, scale=FALSE) {
+  if (is.null(cellidentity)) cellidentity <- rep("cell", dim(obj)[2])
+  if (is.null(projname)) projname <- paste("SLICE-", format(Sys.time(), "%b%d_%H_%M_%S"), "-", sep="")
+  if(!"Seurat" %in% (.packages())){
+    stop("Seurat is not loaded!")
+  }
+  
+  if (length(cellidentity)==1){
+    if(cellidentity %in% colnames(obj@meta.data)){
+      cellidentity = as.factor(obj@meta.data[,cellidentity])
+    }else{
+      stop("Cellidentity is not in meta.data columns")
+    }
+  } else if(length(cellidentity)!=dim(obj)[2]){
+    stop("Cellidentity is not the same size as the cell count")
+  }
+  
+  if(scale && dim(obj@assays[[assay]]@scale.data)[2]==0){
+    stop("The Seurat object is not scaled. Please scale the object or set scale to false.")
+  } else if(!scale){
+    mt = obj@assays[[assay]]@counts
+  } else{
+    mt = obj@assays[[assay]]@scale.data
+    
+  }
+
+  return(construct(exprmatrix = as.data.frame(as.matrix(mt)), cellidentity = cellidentity, projname = projname))
+}
+
 
 #' calculate scEntropies of individual cells
 #'
@@ -145,7 +185,8 @@ setMethod("getEntropy","slice",
               ret <- NULL
               ret <- scEntropy(exprs(es), clusters=clusters, km=km, calculation=calculation, r=B.num,
                                exp.cutoff=exp.cutoff, n=B.size, p=0, k=clustering.k, cmethod="kmeans", 
-                               prior="pr", random.seed=random.seed, context_str=object@projname, verbose=F)
+                               prior="pr", random.seed=random.seed, context_str=object@projname, 
+                               verbose=F)
               
               ename <- paste("scEntropy.", calculation, sep="")
               evalues <- ret$entropy
@@ -396,7 +437,7 @@ setMethod("getTrajectories","slice",
               if (is.null(model)) {
                 model <- object@model
               }
-               
+             
               trajectories <- NULL
               NN.type="all"
               do.plot=T
@@ -471,6 +512,7 @@ setMethod("getProfiles","slice",
             
             profiles <- NULL
             if (trajectory.type=="sp") {
+              
               profiles <- get.SPT.Profiles(object@data[genes.use, ], transitions=trajectories$transitions, 
                                            context_str=object@projname, do.plot=T, plot.xlabel=NULL, plot.ylabel=NULL, plot.w=2.8, plot.h=1)
             } else if (trajectory.type=="pc") {
@@ -896,20 +938,17 @@ scEntropy <- function(exp.m, clusters=NULL, km=NULL, calculation="bootstrap", r=
       y.clusters <- y[, 1]
       y <- y[, 2:dim(y)[2]] # each value represents the number of expressed genes in each cluster in each cell
       
-      
       entropy <- rep(NA, ncells)
-
 
       if (prior=="pr") { 
         a <- as.numeric(gclus.summary$PERCENTAGE)
       } else if (prior=="no") { 
-		a <- rep(0, dim(gclus.summary)[1])
-	  }
+		    a <- rep(0, dim(gclus.summary)[1])
+      }
       
       for (i in 1:ncells) {
         entropy[i] <- entropy::entropy.Dirichlet(y[,i], a=a)
-      }
-      
+        }
       ee[, rr] <- as.numeric(entropy)
       rr <- rr + 1
     }
@@ -1716,7 +1755,12 @@ get.SPT.Profiles <- function(es, transitions, context_str="",
     
   cat("\nExtracting lineage dependent gene expression profiles\n")
   
+  if(length(transitions)<=0) {
+    stop("Empty transitions")
+  }
+  
   transition.profiles <- list()
+  
   
   for (i in 1:length(transitions)) {
     
@@ -2053,11 +2097,13 @@ get.PC.Transitions <- function(es, model, start, end, do.trim=F, do.plot=T, cont
       i.path.states <- cells.df$slice.state[which(rownames(cells.df) %in% i.path)]
       i.cells.df <- cells.df[which(cells.df$slice.state %in% i.path.states), ]
       i.cells.w <- (1-as.numeric(i.cells.df$entropy))
-      i.pcurve.fit <- principal.curve(as.matrix(i.cells.df[, dim.cols]), smoother="smooth.spline", w=i.cells.w, df=length(i.path)+1)
       
-      i.pseudotime <- as.data.frame(i.pcurve.fit$s[i.pcurve.fit$tag, ]) # correct direction
+      i.pcurve.fit <- principal_curve(as.matrix(i.cells.df[, dim.cols]), smoother="smooth_spline", w=i.cells.w, df=length(i.path)+1)
+      
+      i.pseudotime <- as.data.frame(i.pcurve.fit$s[i.pcurve.fit$ord, ]) # correct direction
       s.id <- which(rownames(i.pseudotime)==i.start)
       e.id <- which(rownames(i.pseudotime)==i.end)
+      
       if (s.id > e.id) { 
         if (do.trim==T) {
           i.pseudotime <- i.pseudotime[e.id:s.id, ]
@@ -2149,11 +2195,13 @@ get.PC.Transitions.stepwise <- function(es, model, start, end, do.trim=F, do.plo
         i.path.states <- cells.df$slice.state[which(rownames(cells.df) %in% i.path)]
         i.cells.df <- cells.df[which(cells.df$slice.state %in% i.path.states), ]
         i.cells.w <- (1-as.numeric(i.cells.df$entropy))
-        i.pcurve.fit <- principal.curve(as.matrix(i.cells.df[, dim.cols]), smoother="smooth.spline", w=i.cells.w, df=length(i.path)+1)
         
-        i.pseudotime <- as.data.frame(i.pcurve.fit$s[i.pcurve.fit$tag, ]) # correct direction
+        i.pcurve.fit <- principal_curve(as.matrix(i.cells.df[, dim.cols]), smoother="smooth_spline", w=i.cells.w, df=length(i.path)+1)
+        
+        i.pseudotime <- as.data.frame(i.pcurve.fit$s[i.pcurve.fit$ord, ]) # correct direction
         s.id <- which(rownames(i.pseudotime)==i.start)
         e.id <- which(rownames(i.pseudotime)==i.end)
+        
         if (s.id > e.id) { 
           if (do.trim==T) {
             i.pseudotime <- i.pseudotime[e.id:s.id, ]
@@ -2192,7 +2240,7 @@ get.PC.Transitions.stepwise <- function(es, model, start, end, do.trim=F, do.plo
         
         i.jk.cells.df <- cells.df[which(cells.df$slice.state %in% c(i.j.state, i.k.state)), ]
         i.jk.cells.w <- (1-as.numeric(i.jk.cells.df$entropy))
-        i.jk.pcurve.fit <- principal.curve(as.matrix(i.jk.cells.df[, dim.cols]), smoother="smooth.spline", w=i.jk.cells.w, df=3)
+        i.jk.pcurve.fit <- principal_curve(as.matrix(i.jk.cells.df[, dim.cols]), smoother="smooth_spline", w=i.jk.cells.w, df=3)
         i.jk.pseudotime <- as.data.frame(i.jk.pcurve.fit$s[i.jk.pcurve.fit$tag, ])
         
         i.jk.s.id <- which(rownames(i.jk.pseudotime)==i.jk.start)
@@ -2217,7 +2265,7 @@ get.PC.Transitions.stepwise <- function(es, model, start, end, do.trim=F, do.plo
           
           i.jk.cells.df <- cells.df[which(cells.df$slice.state %in% c(i.j.state, i.k.state)), ]
           i.jk.cells.w <- (1-as.numeric(i.jk.cells.df$entropy))
-          i.jk.pcurve.fit <- principal.curve(as.matrix(i.jk.cells.df[, dim.cols]), smoother="smooth.spline", w=i.jk.cells.w, df=3)
+          i.jk.pcurve.fit <- principal_curve(as.matrix(i.jk.cells.df[, dim.cols]), smoother="smooth_spline", w=i.jk.cells.w, df=3)
           i.jk.pseudotime <- as.data.frame(i.jk.pcurve.fit$s[i.jk.pcurve.fit$tag, ])
           
           i.jk.s.id <- which(rownames(i.jk.pseudotime)==i.jk.start)
@@ -2478,9 +2526,9 @@ getCellSimilarityNetwork <- function(x, dist.method="euclidean", wiring.threshol
   # cell pairwise distance
   A <- NULL
   
-  if (class(x)=="dist") {
+  if (inherits(x,"dist")) {
     A <- as.matrix(x)
-  } else if (class(x)=="matrix") {
+  } else if (inherits(x,"matrix")) {
     if (dist.method=="pearson" | dist.method=="spearman") {
       A <- (1-cor(x, method=dist.method))/2
     } else {
@@ -2582,9 +2630,9 @@ getStateGraph <- function(x, dist.method="euclidean", type="mst") {
   # cell pairwise distance
   A <- NULL
   
-  if (class(x)=="dist") {
+  if (inherits(x,"dist")) {
     A <- as.matrix(x)
-  } else if (class(x)=="matrix") {
+  } else if (inherits(x,"matrix")) {
     if (dist.method=="pearson" | dist.method=="spearman") {
       A <- (1-cor(x, method=dist.method))/2
     } else {
