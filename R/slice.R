@@ -345,7 +345,7 @@ setMethod("getLineageModel","slice",
           function(object, lm.method="clustering", model.type="tree", reverse=F, ss.method="all", ss.threshold=0.25, # common parameter
                             wiring.threshold=function(mst) max(mst), community.method="louvain",                     # parameters for graph-based method                        
                             cluster.method="kmeans", k=NULL, k.max=10, B=100, k.opt.method="firstmax",               # parameters for clustering-based method
-                            ...) {
+                            parallel=FALSE, cores=NA, ...) {
             
               lmmethods <- c("clustering","graph")
               mid <- pmatch(lm.method, lmmethods)
@@ -359,7 +359,8 @@ setMethod("getLineageModel","slice",
                 lm <- getLM.graph(object@data, model.type=model.type, wiring.threshold=wiring.threshold, 
                                   community.method=community.method,                                            
                                   ss.method=ss.method, ss.threshold=ss.threshold,                                  
-                                  reverse = reverse, do.plot=T, context_str=object@projname)
+                                  reverse = reverse, do.plot=T, context_str=object@projname, parallel=parallel,
+                                  cores=cores)
               } else if (lm.method=="clustering") {
                 lm <- getLM.clustering(object@data, model.type=model.type, cluster.method=cluster.method, 
                                        k=k, k.max=k.max, B=B, k.opt.method=k.opt.method, 
@@ -955,7 +956,7 @@ scEntropy <- function(exp.m, clusters=NULL, km=NULL, calculation="bootstrap", r=
       
       for (i in 1:ncells) {
         entropy[i] <- entropy::entropy.Dirichlet(y[,i], a=a)
-        }
+      }
       ee[, rr] <- as.numeric(entropy)
       rr <- rr + 1
     }
@@ -963,6 +964,7 @@ scEntropy <- function(exp.m, clusters=NULL, km=NULL, calculation="bootstrap", r=
   } else {
     stop("invalid value for r")
   }
+  
   cat("\n")
   return(list(entropy=apply(ee, 1, mean), entropies=ee))
 }
@@ -1128,7 +1130,8 @@ getLM.graph <- function(es, model.type="tree",
                         community.method="louvain",                                            
                         ss.method="all", ss.threshold=0.25,                                  
                         reverse = FALSE, 
-                        do.plot=T, context_str="") {
+                        do.plot=T, context_str="",
+                        parallel, cores) {
   
   ssmethods <- c("all", "top", "pcst")
   ssid <- pmatch(ss.method, ssmethods)
@@ -1183,7 +1186,8 @@ getLM.graph <- function(es, model.type="tree",
   
   reducedDims <- t(pData(es)[, dim.cols.idx])
   
-  nets <- getCellSimilarityNetwork(reducedDims, dist.method="euclidean", wiring.threshold=wiring.threshold)
+  nets <- getCellSimilarityNetwork(reducedDims, dist.method="euclidean", wiring.threshold=wiring.threshold,
+                                   parallel = parallel, cores = cores)
   
   mst <- nets$mst
   gp <- nets$csn
@@ -2512,7 +2516,8 @@ fit_helper <- function(x, ptime, k) {
 }
 
 
-getCellSimilarityNetwork <- function(x, dist.method="euclidean", wiring.threshold=function(x) max(x)*1) {
+getCellSimilarityNetwork <- function(x, dist.method="euclidean", wiring.threshold=function(x) max(x)*1,
+                                     parallel, cores) {
   
   
   #######################################################################
@@ -2556,21 +2561,68 @@ getCellSimilarityNetwork <- function(x, dist.method="euclidean", wiring.threshol
   mst <- minimum.spanning.tree(mst)
   
   csn <- mst
+  pb <- progress_bar$new(
+    format = ":percent [:bar] :elapsed | eta: :eta",
+    total = dim(A)[1]*dim(A)[2],
+    show_after=0,
+    force=TRUE,
+    width = 60)
+  progress <- function(n){
+    pb$tick()
+  }
+  cat("Getting Cell Similarity Matrix:\n")
   
-  if (!is.null(wiring.threshold)) {
-    threshold <- wiring.threshold(E(csn)$weight)
+  if(parallel){
+    if(is.na(cores)){
+      cat("Core number not specified. Number of cores is set to # of cores minus 1\n")
+      cores=detectCores()[1]-1
+    }else{
+      if(detectCores()[1]<cores){
+        cat("Core number is larger than detedted cores. Number of cores is set to # of cores minus 1\n")
+        cores=detectCores()[1]-1
+      }
+    }
+    cl = makeCluster(cores)
+    registerDoSNOW(cl)
     
-    if (threshold>0) {
-      # local wiring
-      AE <- melt(A)
-      colnames(AE) <- c("source", "target", "weight")
-      AE <- AE[which(AE$weight<=threshold & AE$weight>0),]
-      for (i in 1:dim(AE)[1]) {
-        v1 <- as.character(AE$source[i])
-        v2 <- as.character(AE$target[i])
-        w <- as.numeric(AE$weight[i])
-        if(are.connected(csn, v1, v2) == FALSE) {
-          csn <- add.edges(csn, c(v1, v2), attr=list(weight=w))
+    
+    
+    if (!is.null(wiring.threshold)) {
+      threshold <- wiring.threshold(E(csn)$weight)
+      
+      if (threshold>0) {
+        # local wiring
+        AE <- melt(A)
+        colnames(AE) <- c("source", "target", "weight")
+        AE <- AE[which(AE$weight<=threshold & AE$weight>0),]
+        foreach(i=1:dim(AE)[1], .options.snow=list(progress = progress)) %dopar% {
+          v1 <- as.character(AE$source[i])
+          v2 <- as.character(AE$target[i])
+          w <- as.numeric(AE$weight[i])
+          if(are.connected(csn, v1, v2) == FALSE) {
+            csn <- add.edges(csn, c(v1, v2), attr=list(weight=w))
+          }
+        }
+      }
+    }
+    stopCluster(cl)
+  }else{
+    if (!is.null(wiring.threshold)) {
+      threshold <- wiring.threshold(E(csn)$weight)
+      
+      if (threshold>0) {
+        # local wiring
+        AE <- melt(A)
+        colnames(AE) <- c("source", "target", "weight")
+        AE <- AE[which(AE$weight<=threshold & AE$weight>0),]
+        for (i in 1:dim(AE)[1]) {
+          progress()
+          v1 <- as.character(AE$source[i])
+          v2 <- as.character(AE$target[i])
+          w <- as.numeric(AE$weight[i])
+          if(are.connected(csn, v1, v2) == FALSE) {
+            csn <- add.edges(csn, c(v1, v2), attr=list(weight=w))
+          }
         }
       }
     }
